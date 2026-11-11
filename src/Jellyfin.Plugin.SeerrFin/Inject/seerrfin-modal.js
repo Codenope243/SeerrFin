@@ -47,37 +47,52 @@ window.seerrFinLog = window.seerrFinLog || {
     let activeQualityRoot = null;
     let escapeHandler = null;
     const ratingCache = new Map();
-    const ratingQueue = [];
-    let activeRatingRequests = 0;
+    const pendingRatingJobs = new Map();
+    let ratingBatchTimer = null;
 
-    function loadRatings() {
-        while (activeRatingRequests < 4 && ratingQueue.length) {
-            const job = ratingQueue.shift();
+    function flushRatingsBatch() {
+        ratingBatchTimer = null;
+        const userId = ApiClient.getCurrentUserId();
+        const jobs = Array.from(pendingRatingJobs.values());
+        pendingRatingJobs.clear();
 
-            if (job.userId !== ApiClient.getCurrentUserId()) {
-                job.resolve({});
-                continue;
-            }
+        const activeJobs = jobs.filter(function (job) {
+            if (job.userId === userId) return true;
 
-            activeRatingRequests++;
-            const path = job.mediaType === 'tv' ? 'tv/' + job.mediaId + '/ratings' : 'movie/' + job.mediaId + '/ratingscombined';
+            job.resolve({});
+            return false;
+        });
+        if (!activeJobs.length) return;
 
-            ApiClient.ajax({
-                url: ApiClient.getUrl('SeerrFin/jellyseerr/' + path),
-                type: 'GET',
-                dataType: 'json'
-            }).then(function (ratings) {
-                job.resolve(job.mediaType === 'tv' ? { rt: ratings } : ratings || {});
-            }).catch(function (err) {
-                ratingCache.delete(job.key);
-                if (!err || err.status !== 404) log.warn('Seerr ratings fetch failed', err);
-
-                job.resolve({});
-            }).finally(function () {
-                activeRatingRequests--;
-                loadRatings();
+        ApiClient.ajax({
+            url: ApiClient.getUrl('SeerrFin/ratings/batch'),
+            type: 'POST',
+            contentType: 'application/json',
+            dataType: 'json',
+            data: JSON.stringify({
+                items: activeJobs.map(function (job) {
+                    return { mediaType: job.mediaType, tmdbId: job.mediaId };
+                })
+            })
+        }).then(function (ratingsById) {
+            activeJobs.forEach(function (job) {
+                const ratings = ratingsById?.[job.mediaType + ':' + job.mediaId];
+                job.resolve(job.mediaType === 'tv' && ratings ? { rt: ratings } : ratings || {});
             });
-        }
+        }).catch(function (err) {
+            activeJobs.forEach(function (job) {
+                ratingCache.delete(job.key);
+                job.resolve({});
+            });
+            log.warn('Seerr ratings batch fetch failed', err);
+        });
+    }
+
+    function queueRatingsBatch(job) {
+        pendingRatingJobs.set(job.key, job);
+        if (ratingBatchTimer !== null) clearTimeout(ratingBatchTimer);
+
+        ratingBatchTimer = setTimeout(flushRatingsBatch, 75);
     }
 
     function fetchRatings(mediaId, mediaType) {
@@ -88,14 +103,13 @@ window.seerrFinLog = window.seerrFinLog || {
             if (ratingCache.size >= 200) ratingCache.delete(ratingCache.keys().next().value);
 
             ratingCache.set(key, new Promise(function (resolve) {
-                ratingQueue.push({
+                queueRatingsBatch({
                     mediaId: mediaId,
                     mediaType: mediaType,
                     userId: userId,
                     key: key,
                     resolve: resolve
                 });
-                loadRatings();
             }));
         }
 

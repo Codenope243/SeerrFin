@@ -10,6 +10,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Jellyfin.Plugin.SeerrFin.Controllers;
@@ -281,6 +282,33 @@ public class SeerrFinController : ControllerBase
             .ConfigureAwait(false);
 
         return new ContentResult { StatusCode = statusCode, Content = responseBody, ContentType = contentType };
+    }
+
+    [HttpPost("ratings/batch")]
+    [Authorize]
+    public async Task<IActionResult> GetRatingsBatch(
+        [FromBody] RatingBatchRequestDto request,
+        [FromServices] IUserManager userManager,
+        CancellationToken cancellationToken
+    )
+    {
+        Response.Headers.CacheControl = "no-store";
+        if (request.Items == null || request.Items.Count == 0 || request.Items.Count > 100)
+        {
+            return BadRequest(new { message = "Provide between 1 and 100 rating items." });
+        }
+
+        string? username = GetUsername(userManager);
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            return Forbid();
+        }
+
+        Dictionary<string, JToken?> ratings = await _proxyService
+            .GetRatingsAsync(username, request.Items, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Content(JsonConvert.SerializeObject(ratings), "application/json");
     }
 
     [HttpGet("Configuration")]
